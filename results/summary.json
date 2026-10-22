@@ -1,0 +1,19 @@
+{
+  "first_interval_utc": "2024-06-13 22:00",
+  "last_fundamentals_local_end": "2026-10-22 08:45",
+  "data_downloaded": "2026-10-22",
+  "generated_utc": "2026-10-22 07:49",
+  "base_year": 2025,
+  "impact_scale": 0.84,
+  "model": {
+    "blocks": 24,
+    "n_bins": 10,
+    "load": "residual"
+  },
+  "main_config": "monotone, residual load, per month x hour",
+  "sensitivity_scales": [
+    1.0,
+    0.5
+  ],
+  "base_days": 365
+}
