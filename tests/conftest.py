@@ -5,12 +5,16 @@ compared as ``pd.Timestamp`` values, never as integers or dtype strings.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import numpy as np
 import pandas as pd
 import pytest
+from pse_opendata.cache import MonthCache
+from pse_opendata.catalog import get_report
+from pse_opendata.frames import time_columns
 
+from bess_saturation.pse_api import INTERVAL, SERIES
 from bess_saturation.supply import TZ, merge
 
 
@@ -53,11 +57,18 @@ def synthetic(start: date, end: date, seed: int = 0, noise: float = 20.0) -> tup
 
 
 def write_cache(cache_dir, name: str, frame: pd.DataFrame) -> None:
-    """Split a frame into monthly cache files named like ``load_series`` does."""
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    months = pd.Series([f"{d:%Y-%m}" for d in frame["business_date"]], index=frame.index)
-    for label, part in frame.groupby(months.to_numpy()):
-        part.to_parquet(cache_dir / f"{name}_{label}.parquet")
+    """Store a frame of ``load_series`` as the monthly pse-opendata cache files it reads offline."""
+    spec = SERIES[name]
+    report = get_report(spec.endpoint)
+    out = time_columns(frame.index, INTERVAL)
+    for api in report.field_names:
+        out[api] = frame[spec.fields[api]].to_numpy() if api in spec.fields else np.nan
+    cache = MonthCache(cache_dir)
+    months = pd.Series([d.replace(day=1) for d in out["business_date"]])
+    for first, part in out.groupby(months.to_numpy()):
+        last = (pd.Timestamp(first) + pd.offsets.MonthEnd(0)).date()
+        cache.write("api", report.name, first, part.reset_index(drop=True),
+                    fetched_utc=datetime(2026, 1, 1, tzinfo=UTC), first_day=first, last_day=last)
 
 
 @pytest.fixture(scope="session")

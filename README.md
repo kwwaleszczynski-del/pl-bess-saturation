@@ -266,10 +266,11 @@ operator), downloaded from the reports API `https://api.raporty.pse.pl/api` with
 | | `jgm` | net output of storage units (pumped storage pumping), MW; descriptive only |
 | | `jg`, `jnwrb` | generation of units active / not active on the balancing market, MW; cached, not used |
 
-`dtime_utc` is the **end** of each 15-minute interval; the code converts it to the interval start. Requests use
-`$filter` on `business_date`, `$first=20000` and follow `nextLink`. The data are cached as monthly Parquet files
-in `data/` (about 5 MB), which is not part of the repository. The RCE price was hourly until 30 September 2025 (the
-four quarter-hours of an hour share one price) and has 15-minute resolution from 1 October 2025.
+The data are read with [pse-opendata](https://pypi.org/project/pse-opendata/), which converts PSE's `dtime_utc`
+(the **end** of each 15-minute interval) to the interval start, pages through the API and caches monthly Parquet
+files in `data/` (about 12 MB, not part of the repository); a month is downloaded again until the revision window of
+its report has passed. The RCE price was hourly until 30 September 2025 (the four quarter-hours of an hour share one
+price) and has 15-minute resolution from 1 October 2025.
 
 **Terms of use.** PSE publishes conditions for re-using public sector information
 ([www.pse.pl, BIP, "Ponowne wykorzystywanie informacji sektora publicznego"](https://www.pse.pl/bip/ponowne-wykorzystanie-informacji-publicznej),
@@ -293,7 +294,7 @@ The repository contains no raw PSE data, only derived statistics in `results/` a
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"      # Linux/macOS: .venv/bin/python
 
-python -m bess_saturation fetch                       # download the PSE series into data/ (~5 MB, ~1 min)
+python -m bess_saturation fetch                       # download the PSE series into data/ (~12 MB, ~1 min)
 python -m bess_saturation run                         # validation, fleet sweep, results/, figures, dashboard
 python -m bess_saturation run --offline --today 2026-10-22 --workers 8   # rebuild from the cache
 python -m bess_saturation run --year 2026 --results results_2026        # another base year
@@ -306,7 +307,7 @@ A full run (validation, 42 fleet simulations of 365 days and 22 sensitivity runs
 
 ```
 src/bess_saturation/
-  pse_api.py     PSE API client with monthly Parquet cache
+  pse_api.py     PSE series through pse-opendata (monthly Parquet cache, data freshness)
   supply.py      monotone supply curves per month and hour, out-of-sample validation
   fleet.py       competitive-equilibrium dispatch of a price-making fleet (LP, MILP fallback)
   analysis.py    fleet-size sweep, marginal revenue, price statistics and daily profiles

@@ -1,4 +1,4 @@
-"""Client for the public PSE reports API (https://api.raporty.pse.pl) with a monthly Parquet cache.
+"""PSE series of the analysis, read with the pse-opendata client (https://pypi.org/project/pse-opendata/).
 
 Series (15-minute intervals, business dates in Europe/Warsaw, available from 14 June 2024):
     rce   rce-pln       RCE, market price of electricity (day-ahead), PLN/MWh
@@ -12,25 +12,24 @@ Series (15-minute intervals, business dates in Europe/Warsaw, available from 14 
                         swm_p    balance of parallel cross-border exchange (+ = import)
                         swm_np   balance of non-parallel cross-border exchange (+ = import)
 
-The API needs no key. ``dtime_utc`` is the END of each interval; frames returned here are indexed by interval START
-(UTC). Pagination: ``$filter`` on business_date, ``$first=20000`` and ``nextLink``.
+pse-opendata downloads the public PSE reports API (no key) and caches whole months as Parquet files in ``cache_dir``
+(``api/<report>/<YYYY-MM>.parquet``); a month is downloaded again until the revision window of its report has
+passed (3 days for prices, 60 days for his-wlk-cal). Frames returned here are indexed by interval START (UTC).
 
 Usage:
     from bess_saturation.pse_api import load_series
-    df, status = load_series("rce", date(2024, 6, 14), date(2026, 10, 21), cache_dir=Path("data"), today=date.today())
+    df, status = load_series("rce", date(2024, 6, 14), date(2026, 10, 21), cache_dir=Path("data"))
 """
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
-import requests
+import pse_opendata as pse
 
-BASE_URL = "https://api.raporty.pse.pl/api"
 INTERVAL = pd.Timedelta("15min")
 HISTORY_START = date(2024, 6, 14)   # first business date of the 15-minute RCE and of his-wlk-cal
 log = logging.getLogger(__name__)
@@ -61,6 +60,9 @@ class SeriesStatus:
     last_interval: pd.Timestamp | None = None
 
 
+STATUS = {"downloaded": "fetched", "cached": "cached", "stale": "stale"}   # pse-opendata status -> SeriesStatus list
+
+
 def empty_frame(series: str) -> pd.DataFrame:
     cols = list(SERIES[series].fields.values())
     idx = pd.DatetimeIndex([], tz="UTC", name="ts_utc")
@@ -69,95 +71,44 @@ def empty_frame(series: str) -> pd.DataFrame:
     return out
 
 
-def parse_records(records: list[dict], series: str) -> pd.DataFrame:
-    """API records -> frame indexed by interval START (UTC). Rows without any value (future intervals) are dropped."""
-    if not records:
+def to_frame(raw: pd.DataFrame, series: str) -> pd.DataFrame:
+    """pse-opendata frame -> frame indexed by interval START (UTC) with the column names of ``SERIES``."""
+    spec = SERIES[series]
+    if raw.empty:
         return empty_frame(series)
-    spec = SERIES[series]
-    df = pd.DataFrame.from_records(records)
-    out = pd.DataFrame({col: pd.to_numeric(df[api], errors="coerce") if api in df else float("nan")
-                        for api, col in spec.fields.items()})
-    end = pd.to_datetime(df["dtime_utc"], format="ISO8601")
-    out.index = pd.DatetimeIndex(end, name="ts_utc").tz_localize("UTC") - INTERVAL
-    out["business_date"] = pd.to_datetime(df["business_date"]).dt.date.to_numpy()
-    out = out.dropna(subset=list(spec.fields.values()), how="all")
-    return out[~out.index.duplicated(keep="last")].sort_index()
+    out = raw.set_index("start_utc")[list(spec.fields)].rename(columns=spec.fields)
+    out.index.name = "ts_utc"
+    out["business_date"] = raw["business_date"].to_numpy()
+    return out
 
 
-def _get(session: requests.Session, url: str, params: dict | None = None, retries: int = 3) -> dict:
-    for attempt in range(retries):
-        try:
-            r = session.get(url, params=params, timeout=60)
-            r.raise_for_status()
-            return r.json()
-        except (requests.RequestException, ValueError) as e:
-            if attempt == retries - 1:
-                raise
-            log.warning("PSE API request failed (%s), retrying", e)
-            time.sleep(2 ** attempt)
-    raise RuntimeError("unreachable")
-
-
-def fetch_period(series: str, start: date, end: date, session: requests.Session | None = None) -> pd.DataFrame:
-    """Fetch one series for business dates start..end (inclusive), following pagination links."""
-    spec = SERIES[series]
-    session = session or requests.Session()
-    session.headers.setdefault("User-Agent", "pl-bess-saturation (open-source analysis)")
-    params = {
-        "$filter": f"business_date ge '{start:%Y-%m-%d}' and business_date le '{end:%Y-%m-%d}'",
-        "$select": ",".join(["dtime_utc", "business_date", *spec.fields]),
-        "$first": 20000,
-    }
-    payload = _get(session, f"{BASE_URL}/{spec.endpoint}", params)
-    records = list(payload.get("value", []))
-    while payload.get("nextLink"):
-        payload = _get(session, payload["nextLink"])
-        records += payload.get("value", [])
-    return parse_records(records, series)
-
-
-def load_series(series: str, start: date, end: date, cache_dir: Path, today: date, refresh_days: int = 10,
-                session: requests.Session | None = None, offline: bool = False) -> tuple[pd.DataFrame, SeriesStatus]:
+def load_series(series: str, start: date, end: date, cache_dir: Path, offline: bool = False,
+                client: pse.Client | None = None) -> tuple[pd.DataFrame, SeriesStatus]:
     """Load business dates start..end month by month without raising on API errors.
 
-    Months that ended more than ``refresh_days`` before ``today`` are final and read from cache when the cached copy
-    reaches the last day of the month; recent months are downloaded again (late publications and corrections).
-    When a download fails, the last cached copy is used and the month is reported as stale. ``offline`` uses the
+    Whole months are requested, so that pse-opendata caches them and an offline run rebuilds the same result.
+    When a download fails, the cached copy of the month is used and the month is reported as stale; without a cached
+    copy it is reported as missing. Rows without any value (future intervals) are dropped. ``offline`` uses the
     cache only.
     """
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    session = session or requests.Session()
+    spec = SERIES[series]
+    client = client or pse.Client(cache_dir=cache_dir, offline=offline, allow_stale=True)
     status = SeriesStatus(series)
     frames = []
     for month_start in pd.date_range(date(start.year, start.month, 1), end, freq="MS"):
         label = f"{month_start:%Y-%m}"
-        m_start = month_start.date()
         m_end = (month_start + pd.offsets.MonthEnd(0)).date()
-        cache = cache_dir / f"{series}_{label}.parquet"
-        final = m_end < today - timedelta(days=refresh_days)
-        cached = pd.read_parquet(cache) if cache.exists() else None
-        complete = cached is not None and len(cached) > 0 and cached["business_date"].max() >= m_end
-        if (offline and cached is not None) or (final and complete):
-            frames.append(cached)
-            status.cached.append(label)
-            continue
-        df = None
-        if not offline:
-            try:
-                df = fetch_period(series, m_start, min(m_end, end), session)
-            except (requests.RequestException, ValueError, KeyError) as e:
-                log.error("%s %s: download failed (%s)", series, label, e)
-        if df is not None:
-            if not df.empty:
-                df.to_parquet(cache)
-            frames.append(df)
-            status.fetched.append(label)
-            log.info("%s %s: %d intervals", series, label, len(df))
-        elif cached is not None:
-            frames.append(cached)
-            status.stale.append(label)
-        else:
+        loaded = len(client.loads)
+        try:
+            raw = client.get(spec.endpoint, month_start.date(), m_end, fields=list(spec.fields), dropna=True)
+        except pse.PseError as e:
+            log.error("%s %s: download failed (%s)", series, label, e)
             status.missing.append(label)
+            continue
+        for load in client.loads[loaded:]:
+            getattr(status, STATUS[load.status]).append(label)
+        log.info("%s %s: %d intervals", series, label, len(raw))
+        frames.append(to_frame(raw, series))
     frames = [f for f in frames if not f.empty]
     out = pd.concat(frames).sort_index() if frames else empty_frame(series)
     out = out[~out.index.duplicated(keep="last")]

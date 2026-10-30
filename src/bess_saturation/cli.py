@@ -7,9 +7,10 @@ Usage:
     python -m bess_saturation render                      # figures and dashboard again from results/ (no solving)
     python -m bess_saturation run --year 2026 --results results_2026   # another base year
 
-Data are cached as monthly Parquet files in ./data (override with --data-dir or BESS_SAT_DATA_DIR). Months that
-ended more than 10 days ago are read from the cache, recent months are downloaded again. Exit code 2 means that no
-prices or no fundamentals were available, so nothing was written.
+Data are read with pse-opendata and cached as monthly Parquet files in ./data (override with --data-dir or
+BESS_SAT_DATA_DIR); a month is downloaded again until the revision window of its report has passed (3 days for
+prices, 60 days for fundamentals). Exit code 2 means that no prices or no fundamentals were available, so nothing
+was written.
 """
 from __future__ import annotations
 
@@ -50,8 +51,7 @@ def _date(s: str) -> date:
 def load_frame(args, today: date) -> tuple[pd.DataFrame, dict] | None:
     loaded = {}
     for name in ("mix", "rce"):
-        df, status = load_series(name, HISTORY_START, today + timedelta(days=1), args.data_dir, today=today,
-                                 offline=args.offline)
+        df, status = load_series(name, HISTORY_START, today + timedelta(days=1), args.data_dir, offline=args.offline)
         log.info("%s: %d intervals, last %s, fetched %d, cached %d, stale %s, missing %s", name, len(df),
                  status.last_interval, len(status.fetched), len(status.cached), status.stale, status.missing)
         loaded[name] = (df, status)
@@ -68,7 +68,7 @@ def load_frame(args, today: date) -> tuple[pd.DataFrame, dict] | None:
 
 
 def _downloaded(args) -> str:
-    files = list(args.data_dir.glob("*.parquet"))
+    files = list(args.data_dir.rglob("*.parquet"))
     if args.offline and files:
         return f"{datetime.fromtimestamp(max(f.stat().st_mtime for f in files)):%Y-%m-%d}"
     return f"{date.today():%Y-%m-%d}"
