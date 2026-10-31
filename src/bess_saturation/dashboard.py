@@ -201,7 +201,7 @@ tr.hl { background: var(--hl); }
 table.ctx td, table.ctx th { white-space: normal; vertical-align: top; }
 ul { color: var(--ink2); margin: 4px 0 12px; padding-left: 20px; }
 footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
-@media (max-width: 520px) { .grid { grid-template-columns: 1fr; } .chart { height: 300px; } }
+@media (max-width: 520px) { .grid { grid-template-columns: 1fr; } .chart { height: 360px; } }
 </style>
 </head>
 <body>
@@ -330,7 +330,7 @@ function draw(id, data, lay) {
   const layout = Object.assign({}, lay, {
     paper_bgcolor: t.surface, plot_bgcolor: t.surface,
     font: { family: 'system-ui, -apple-system, "Segoe UI", sans-serif', color: t.ink, size: 12 },
-    margin: { l: 60, r: 16, t: 8, b: 40 }, legend: { orientation: "h", y: -0.2, font: { color: t.ink2 } },
+    margin: { l: 60, r: 16, t: 8, b: 40 }, legend: { orientation: "h", y: -0.28, yanchor: "top", font: { color: t.ink2 } },
     hoverlabel: { bgcolor: t.surface, bordercolor: t.axis, font: { color: t.ink } },
     xaxis: axis(t, lay.xaxis), yaxis: axis(t, lay.yaxis),
   });
